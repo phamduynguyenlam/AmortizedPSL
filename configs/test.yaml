@@ -1,0 +1,67 @@
+defaults:
+  - default
+  - data
+  - model
+  - _self_
+
+extra:
+  ckpt_name: ckpt.tar
+  suffix_segment: null
+
+experiment:
+  seed: 0
+  mode: test
+  task: optimization
+  model_name: TAMO
+  device: cuda
+  expid: null
+  resume: true
+  override: true
+  log_to_wandb: false
+
+data:
+  function_name: dx2_dy2
+  data_id: null
+  dim_scatter_mode: random_k
+  sigma: 0.0
+  scene: ship
+
+prediction:
+  batch_size: 32
+  nc: null
+  min_nc: 2
+  max_nc: 50
+  read_cache: true
+
+optimization:
+  use_grid_sampling: true
+  use_fixed_query_set: false
+  use_time_budget: true
+  use_factorized_policy: false
+  batch_size: 1
+  T: 100
+  min_T: 10
+  max_T: 100
+  regret_type: ratio
+  num_initial_points: 1
+  num_samples: 1
+  dim_mask_gen_mode: full
+  single_obs_x_dim: null
+  single_obs_y_dim: null
+  read_cache: true
+  write_cache: true
+  epsilon: 0.0
+  num_query_points: 2048
+  fantasy: false
+  q: 1
+  cost_mode: false
+  cost: 1.0
+  
+  use_logit_mask: false
+  sampling_mode: full
+  num_reweighted_samples: 2048
+
+log:
+  plot_enabled: true
+  plot_nc_list: [10, 50, 100]
+  plot_per_n_steps: 25
