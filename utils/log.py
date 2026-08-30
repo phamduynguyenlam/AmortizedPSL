@@ -15,6 +15,57 @@ import torch
 ROOT = ""
 
 
+def format_duration(seconds: float) -> str:
+    """Format a duration compactly for progress logs."""
+    if not np.isfinite(seconds) or seconds < 0:
+        return "unknown"
+    seconds = int(round(seconds))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or days:
+        parts.append(f"{hours:02d}h")
+    if minutes or hours or days:
+        parts.append(f"{minutes:02d}m")
+    parts.append(f"{seconds:02d}s")
+    return " ".join(parts)
+
+
+@dataclass
+class TrainingProgress:
+    """Track completion percentage, throughput, and ETA across one run."""
+
+    total_steps: int
+    start_step: int = 0
+    start_time: float = field(default_factory=time.perf_counter)
+
+    def snapshot(self, completed_steps: int, now: Optional[float] = None) -> Dict[str, float]:
+        if self.total_steps <= 0:
+            raise ValueError("total_steps must be positive")
+        now = time.perf_counter() if now is None else now
+        completed_steps = min(max(completed_steps, 0), self.total_steps)
+        elapsed = max(now - self.start_time, 0.0)
+        completed_this_run = max(completed_steps - self.start_step, 0)
+        steps_per_second = completed_this_run / elapsed if elapsed > 0 else 0.0
+        remaining_steps = self.total_steps - completed_steps
+        eta_seconds = (
+            remaining_steps / steps_per_second
+            if steps_per_second > 0
+            else float("inf")
+        )
+        return {
+            "completed_steps": completed_steps,
+            "total_steps": self.total_steps,
+            "percent": 100.0 * completed_steps / self.total_steps,
+            "elapsed_seconds": elapsed,
+            "eta_seconds": eta_seconds,
+            "steps_per_second": steps_per_second,
+        }
+
+
 def get_log_filename(
     model_name: str,
     expid: str,

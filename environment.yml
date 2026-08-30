@@ -5,11 +5,15 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-      - torch==2.10.0
+      # CUDA 12.8 is required for RTX 50-series (Blackwell). The explicit local
+      # version prevents pip from silently selecting the CPU-only PyPI wheel.
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.10.0+cu128
       - torchdata==0.11.0
       - torchrl==0.11.1
       - gpytorch==1.14
       - botorch==0.13.0
+      - pyro-ppl==1.9.1
       - pymoo==0.6.1.6
       - scipy==1.14.1
       - numpy==2.0.2
@@ -24,3 +28,4 @@ dependencies:
       - sobol-seq==0.2.0
       - flatten-dict==0.4.2
       - python-dotenv==1.2.2
+      - pytest==8.3.4

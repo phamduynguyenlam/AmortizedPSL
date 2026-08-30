@@ -1,0 +1,86 @@
+defaults:
+  - default
+  - data
+  - model
+  - _self_
+
+method:
+  name: psl_tamo
+
+extra:
+  ckpt_name: ckpt.tar
+  suffix_segment: objective_light
+
+experiment:
+  seed: 0
+  mode: test
+  task: prediction
+  model_name: PSL_TAMO
+  device: cuda
+  expid: kaggle_psl_light
+  resume: true
+  override: true
+  log_to_wandb: false
+
+data:
+  function_name: dx2_dy2
+  data_id: null
+  dim_scatter_mode: random_k
+  max_x_dim: 4
+  max_y_dim: 3
+
+prediction:
+  batch_size: 8
+  nc: null
+  min_nc: 2
+  max_nc: 8
+  read_cache: false
+
+# Required by the shared test configuration parser; unused for prediction.
+optimization:
+  use_grid_sampling: false
+  use_fixed_query_set: true
+  use_factorized_policy: false
+  use_time_budget: true
+  batch_size: 1
+  T: 4
+  min_T: 4
+  max_T: 4
+  regret_type: norm_ratio
+  num_initial_points: 8
+  num_samples: 1
+  num_query_points: 64
+  dim_mask_gen_mode: full
+  single_obs_x_dim: null
+  single_obs_y_dim: null
+  read_cache: false
+  write_cache: false
+  epsilon: 0.0
+  use_logit_mask: false
+  sampling_mode: full
+
+log:
+  plot_enabled: false
+  plot_nc_list: [8]
+  plot_per_n_steps: 25
+
+# Must match the light training overrides.
+model:
+  max_x_dim: 7
+  max_y_dim: 1
+  dim_mlp: 32
+  dim_attn: 32
+  nhead: 4
+  dropout: 0.0
+  num_layers_backbone: 2
+  num_layers_encoder: 2
+  num_layers_decoder: 2
+  ctx_prefix_encoder_layer: true
+  dim_hidden: 64
+  depth: 3
+  num_components: 5
+  use_ar: false
+  std_min: 1e-3
+  std_max: 1.0
+  single_mlp: false
+  use_missing_marker: false

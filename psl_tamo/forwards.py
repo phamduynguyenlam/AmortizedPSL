@@ -128,6 +128,12 @@ def optimization_forward_psl(
     device: str,
 ):
     """Run a PSL-TAMO synthetic trajectory and the original REINFORCE loss."""
+    objective_model = getattr(model, "objective_predictor", None)
+    if objective_model is None:
+        raise ValueError(
+            "PSL-TAMO requires model.objective_predictor. "
+            "Build it with model.build_objective_predictor before training."
+        )
     env = GPSampleFunction(
         data_config=data_cfg,
         batch_size=opt_config.batch_size,
@@ -176,8 +182,10 @@ def optimization_forward_psl(
         for psl in psl_models
     ]
     psl_loss = update_psl_inner_loop(
-        psl_models, psl_optimizers, model, z_ctx, s_ctx, z_mask,
-        objective_mask, psl_config.get("num_train_preferences", 64),
+        psl_models, psl_optimizers, objective_model,
+        x_true, y_true, x_mask, objective_mask, env.y_mins,
+        scalarization_config.get("tau", 0.1),
+        psl_config.get("num_train_preferences", 64),
         psl_config.get("init_steps", 50), psl_config.get("preference_method", "dirichlet"),
     )
 
@@ -189,8 +197,10 @@ def optimization_forward_psl(
     for t in range(1, T + 1):
         if psl_config.get("update_steps", 5) > 0:
             psl_loss = update_psl_inner_loop(
-                psl_models, psl_optimizers, model, z_ctx, s_ctx, z_mask,
-                objective_mask, psl_config.get("num_train_preferences", 64),
+                psl_models, psl_optimizers, objective_model,
+                x_true, y_true, x_mask, objective_mask, env.y_mins,
+                scalarization_config.get("tau", 0.1),
+                psl_config.get("num_train_preferences", 64),
                 psl_config.get("update_steps", 5), psl_config.get("preference_method", "dirichlet"),
             )
         lambdas = sample_padded_preferences(

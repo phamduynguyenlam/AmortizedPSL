@@ -5,12 +5,17 @@ import numpy as np
 from types import SimpleNamespace
 
 from forwards import prediction_forward
-from model import ParetoSetMLP, TAMO, TAMOConfig
+from model import (
+    ParetoSetMLP,
+    TAMO,
+    TAMOConfig,
+    build_objective_predictor,
+)
 from psl_tamo.data import prepare_stch_prediction_batches
 from psl_tamo.forwards import project_psl_to_pool, select_next_preference
 import psl_tamo.forwards as psl_forwards
-from psl_tamo.preferences import sample_padded_preferences
 from psl_tamo.scalarization import smooth_tchebycheff
+from psl_tamo.psl_inner_loop import update_psl_inner_loop
 
 
 def _tiny_tamo():
@@ -62,7 +67,7 @@ def test_augmented_prediction_batch():
     assert s_mask.shape == (2, 1) and s_mask.all()
 
 
-def test_prediction_forward_and_psl_input_gradient():
+def test_scalar_prediction_forward():
     model = _tiny_tamo()
     batch_size, nc, nt = 2, 4, 3
     zc, sc = torch.randn(batch_size, nc, 5), torch.randn(batch_size, nc, 1)
@@ -73,17 +78,45 @@ def test_prediction_forward_and_psl_input_gradient():
     assert torch.isfinite(loss) and mse.shape == (1,)
     loss.backward()
 
-    model.zero_grad(set_to_none=True)
-    for parameter in model.parameters():
-        parameter.requires_grad_(False)
+
+def test_objective_head_nll_and_psl_gradient_isolation():
+    scalar_model = _tiny_tamo()
+    objective_model = build_objective_predictor(
+        scalar_model.config, max_x_dim=3, max_y_dim=2
+    )
+    batch_size, nc, nt = 2, 4, 3
+    xc, yc = torch.randn(batch_size, nc, 3), torch.randn(batch_size, nc, 2)
+    xt, yt = torch.randn(batch_size, nt, 3), torch.randn(batch_size, nt, 2)
+    x_mask = torch.ones(batch_size, 3, dtype=torch.bool)
+    objective_mask = torch.ones(batch_size, 2, dtype=torch.bool)
+
+    loss, mse, _ = prediction_forward(
+        objective_model, xc, yc, xt, yt, x_mask, objective_mask
+    )
+    assert torch.isfinite(loss) and mse.shape == (2,)
+    loss.backward()
+    assert any(parameter.grad is not None for parameter in objective_model.parameters())
+
+    objective_model.zero_grad(set_to_none=True)
     psl = ParetoSetMLP(2, 3, hidden_dim=16, depth=3, x_lower=-1, x_upper=1)
-    objective_mask = torch.ones(1, 2, dtype=torch.bool)
-    lambdas = sample_padded_preferences(objective_mask, 8)
-    query = torch.cat((psl(lambdas[0]).unsqueeze(0), lambdas), dim=-1)
-    output = model.predict(zc[:1], sc[:1], query, z_mask[:1], s_mask[:1])
-    output.means.mean().backward()
+    optimizer = torch.optim.Adam(psl.parameters(), lr=1e-3)
+    psl_loss = update_psl_inner_loop(
+        psl_models=[psl],
+        psl_optimizers=[optimizer],
+        objective_model=objective_model,
+        x_ctx=xc[:1],
+        y_ctx=yc[:1],
+        x_mask=x_mask[:1],
+        objective_mask=objective_mask[:1],
+        ideal_point=yc[:1].min(dim=1).values,
+        tau=0.1,
+        num_preferences=8,
+        num_steps=1,
+    )
+    assert np.isfinite(psl_loss)
     assert any(parameter.grad is not None for parameter in psl.parameters())
-    assert all(parameter.grad is None for parameter in model.parameters())
+    assert all(parameter.grad is None for parameter in objective_model.parameters())
+    assert all(parameter.requires_grad for parameter in objective_model.parameters())
 
 
 def test_projection_is_unique_and_avoids_used_points():
@@ -139,6 +172,9 @@ def test_tiny_rollout_end_to_end(monkeypatch):
 
     monkeypatch.setattr(psl_forwards, "GPSampleFunction", FakeDiscreteEnvironment)
     model = _tiny_tamo()
+    model.objective_predictor = build_objective_predictor(
+        model.config, max_x_dim=3, max_y_dim=2
+    )
     data = SimpleNamespace(max_x_dim=3, max_y_dim=2, x_range=[-1.0, 1.0])
     opt = SimpleNamespace(
         batch_size=2, num_samples=1, num_query_points=10,

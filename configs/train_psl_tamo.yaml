@@ -74,6 +74,18 @@ scalarization:
   tau: 0.1
   ideal_point: -1.0
 
+# Objective-wise GMM surrogate. It reuses the original TAMO predictor with
+# true (x, y) history and is optimized only by its prediction NLL.
+objective_prediction:
+  loss_weight: 1.0
+
+log:
+  freq_log: 200
+  freq_save: 500
+  freq_save_extra_burnin: 25000
+  freq_save_extra: 5000
+  freq_log_grad: 1000
+
 psl:
   hidden_dim: 128
   depth: 3

@@ -8,7 +8,7 @@ from typing import Dict
 
 import torch
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import hydra
 import wandb
 
@@ -16,7 +16,13 @@ from data.gp_sample_function import prepare_prediction_batches
 from data.base.preprocessing import has_nan_or_inf
 from data.dataset import MultiFileHDF5Dataset, get_datapaths
 from utils.paths import get_exp_path
-from utils.log import Averager, get_log_filename, get_log_fn
+from utils.log import (
+    Averager,
+    TrainingProgress,
+    format_duration,
+    get_log_filename,
+    get_log_fn,
+)
 from utils.dataclasses import (
     ExConfig,
     PredictionConfig,
@@ -36,6 +42,7 @@ from utils.config import (
 )
 from utils.seed import set_all_seeds
 from forwards import optimization_forward, prediction_forward
+from model import build_objective_predictor
 from psl_tamo.data import prepare_stch_prediction_batches
 from psl_tamo.forwards import optimization_forward_psl
 from utils.wandb_wrapper import init as wandb_init, save_artifact
@@ -61,6 +68,11 @@ def main(config: DictConfig):
     )
     log = get_log_fn(filename=log_filename)
     log(f"Logs will be saved to:\t{log_filename}")
+    log(
+        "==== Resolved training configuration ====\n"
+        + OmegaConf.to_yaml(config, resolve=True)
+        + "========================================="
+    )
 
     if exp_cfg.log_to_wandb:
         log(f"wandb configuration:{config.wandb}\n")
@@ -83,6 +95,7 @@ def main(config: DictConfig):
         method_name=config.get("method", {}).get("name", "tamo"),
         psl_config=config.get("psl", {}),
         scalarization_config=config.get("scalarization", {}),
+        objective_prediction_config=config.get("objective_prediction", {}),
         log=log,
     )
 
@@ -100,11 +113,15 @@ def train(
     method_name: str = "tamo",
     psl_config=None,
     scalarization_config=None,
+    objective_prediction_config=None,
     log: callable = print,
 ):
     # Set random seed
     set_all_seeds(exp_cfg.seed)
     log(f"seed:\t{exp_cfg.seed}")
+    psl_config = psl_config or {}
+    scalarization_config = scalarization_config or {}
+    objective_prediction_config = objective_prediction_config or {}
 
     # ===============================================
     # Load checkpoint
@@ -146,19 +163,34 @@ def train(
     num_burnin_epochs = train_cfg.num_burnin_epochs
     num_after_burnin_epochs = num_total_epochs - num_burnin_epochs
     num_context_size_burnin_epochs = train_cfg.num_nc_burnin_epochs
+    planned_prediction_tasks = num_total_epochs * pred_cfg.batch_size
+    planned_optimization_tasks = (
+        num_after_burnin_epochs * opt_cfg.batch_size * opt_cfg.num_samples
+    )
 
     log(
-        f"==== epochs ===="
-        f"  last epoch:\t{epoch}"
-        f"  num_total_epochs:\t{num_total_epochs}"
-        f"  num_burnin_epochs:\t{num_burnin_epochs}"
-        f"  num_nc_burnin_epochs:\t{num_context_size_burnin_epochs}"
+        f"==== Training workload ====\n"
+        f"  last completed epoch index:\t{epoch}\n"
+        f"  num_total_epochs:\t{num_total_epochs}\n"
+        f"  num_burnin_epochs:\t{num_burnin_epochs}\n"
+        f"  num_nc_burnin_epochs:\t{num_context_size_burnin_epochs}\n"
+        f"  unique dataset tasks:\t{dataset_size}\n"
+        f"  planned prediction task presentations:\t{planned_prediction_tasks}\n"
+        f"  planned optimization trajectories:\t{planned_optimization_tasks}"
     )
 
     # ===============================================
     # Setup model
     # ===============================================
-    model = build_tamo(model_kwargs).to(exp_cfg.device)
+    model = build_tamo(model_kwargs)
+    objective_prediction_enabled = method_name == "psl_tamo"
+    if objective_prediction_enabled:
+        model.objective_predictor = build_objective_predictor(
+            scalar_tamo_config=model.config,
+            max_x_dim=data_cfg.max_x_dim,
+            max_y_dim=data_cfg.max_y_dim,
+        )
+    model = model.to(exp_cfg.device)
     if model_state_dict:
         missing, unexpected = model.load_state_dict(model_state_dict, strict=False)
         if missing:
@@ -177,6 +209,13 @@ def train(
         f"  Config: {model.config}\n"
         f"  Parameters: {sum(p.numel() for p in model.parameters()):,}"
     )
+    if objective_prediction_enabled:
+        log(
+            f"==== Objective predictor enabled ====\n"
+            f"  Config: {model.objective_predictor.config}\n"
+            f"  Parameters: "
+            f"{sum(p.numel() for p in model.objective_predictor.parameters()):,}"
+        )
 
     if exp_cfg.log_to_wandb:
         wandb.watch(model, log="gradients", log_freq=log_cfg.freq_log_grad)
@@ -193,7 +232,13 @@ def train(
     )
 
     if optimizer_state_dict:
-        optimizer.load_state_dict(optimizer_state_dict)
+        try:
+            optimizer.load_state_dict(optimizer_state_dict)
+        except ValueError as error:
+            log(
+                "[WARNING] Optimizer state is incompatible with the objective "
+                f"predictor and will be reinitialized: {error}"
+            )
 
     log(f"Initializing scheduler...")
     scheduler = build_scheduler(
@@ -211,11 +256,21 @@ def train(
         scheduler.load_state_dict(scheduler_state_dict)
 
     ravg = Averager()
+    completed_at_start = min(max(epoch + 1, 0), num_total_epochs)
+    progress = TrainingProgress(
+        total_steps=num_total_epochs,
+        start_step=completed_at_start,
+    )
+    prediction_tasks_seen = 0
+    prediction_tasks_before_run = min(
+        completed_at_start * pred_cfg.batch_size,
+        planned_prediction_tasks,
+    )
 
-    # Repeat dataset if number of epochs exceeds
-    max_epochs_from_dataset = max(1, dataset_size // pred_cfg.batch_size)
-    repeat_round_start = epoch // max_epochs_from_dataset
-    num_repeat_data = math.ceil(num_total_epochs / max_epochs_from_dataset)
+    # Repeat dataset if the requested steps exceed one complete dataset pass.
+    batches_per_dataset = max(1, math.ceil(dataset_size / pred_cfg.batch_size))
+    repeat_round_start = completed_at_start // batches_per_dataset
+    num_repeat_data = math.ceil(num_total_epochs / batches_per_dataset)
     log(f"The loaded datasets would be repeated up to {num_repeat_data} times")
     for repeat_round in range(repeat_round_start, num_repeat_data):
         # ===============================================
@@ -232,7 +287,7 @@ def train(
         dataloader_iter = iter(dataloader)
 
         # Start one training epoch
-        while epoch < num_total_epochs:
+        while epoch < num_total_epochs - 1:
             # Load saved dataset (x, y)
             batch = next(dataloader_iter, None)
             if batch is None:
@@ -250,6 +305,7 @@ def train(
                 continue
 
             epoch += 1
+            current_prediction_batch_size = x.shape[0]
 
             # ===============================================
             # Reinit optimizer and scheduler when starting policy learning
@@ -271,6 +327,12 @@ def train(
                     num_training_steps=num_after_burnin_epochs,
                     num_warmup_steps=train_cfg.num_warmup_steps,
                 )
+                # Joint prediction+RL steps are much slower than burn-in steps;
+                # rebase throughput so the ETA quickly reflects the new phase.
+                progress = TrainingProgress(
+                    total_steps=num_total_epochs,
+                    start_step=epoch,
+                )
 
             # Loss curve would change - to avoid confusion!
             if epoch == num_context_size_burnin_epochs:
@@ -291,6 +353,23 @@ def train(
 
             # Prediction batch: (xc, yc, xt, yt)
             if method_name == "psl_tamo":
+                (
+                    obj_xc,
+                    obj_yc,
+                    obj_xt,
+                    obj_yt,
+                    obj_x_mask,
+                    obj_y_mask,
+                ) = prepare_prediction_batches(
+                    x=x,
+                    y=y,
+                    valid_x_counts=valid_x_counts,
+                    valid_y_counts=valid_y_counts,
+                    dim_scatter_mode=data_cfg.dim_scatter_mode,
+                    min_nc=pred_cfg.min_nc,
+                    max_nc=pred_cfg.max_nc,
+                    warmup=epoch <= num_context_size_burnin_epochs,
+                )
                 xc, yc, xt, yt, x_mask, y_mask = prepare_stch_prediction_batches(
                     x=x,
                     y=y,
@@ -330,9 +409,34 @@ def train(
                 y_mask=y_mask,
                 read_cache=pred_cfg.read_cache,
             )
-
-            loss_pre_val = loss_pre.detach().item()
+            loss_stch_pre_val = loss_pre.detach().item()
             mse_mean = mse_mean.detach()
+
+            loss_objective = None
+            objective_mse_mean = None
+            loss_objective_val = 0.0
+            prediction_loss = loss_pre
+            if objective_prediction_enabled:
+                loss_objective, objective_mse_mean, _ = prediction_forward(
+                    model=model.objective_predictor,
+                    x_ctx=obj_xc,
+                    y_ctx=obj_yc,
+                    x_tar=obj_xt,
+                    y_tar=obj_yt,
+                    x_mask=obj_x_mask,
+                    y_mask=obj_y_mask,
+                    read_cache=False,
+                )
+                objective_loss_weight = objective_prediction_config.get(
+                    "loss_weight", 1.0
+                )
+                prediction_loss = (
+                    prediction_loss + objective_loss_weight * loss_objective
+                )
+                loss_objective_val = loss_objective.detach().item()
+                objective_mse_mean = objective_mse_mean.detach()
+
+            loss_pre_val = prediction_loss.detach().item()
 
             # Prediction loss backward and free up graph
             if epoch >= num_burnin_epochs:
@@ -340,11 +444,16 @@ def train(
             else:
                 loss_weight = 1.0
 
-            (loss_weight * loss_pre).backward()
+            (loss_weight * prediction_loss).backward()
 
-            del loss_pre
+            del loss_pre, prediction_loss
+            if loss_objective is not None:
+                del loss_objective
             del xc, yc, xt, yt
             del x_mask, y_mask, valid_x_counts, valid_y_counts
+            if objective_prediction_enabled:
+                del obj_xc, obj_yc, obj_xt, obj_yt
+                del obj_x_mask, obj_y_mask
 
             # Optimization forward (model + loss)
             loss_acq_val = 0.0
@@ -404,12 +513,29 @@ def train(
             # Tracking and Logging
             # ===============================================
             epoch_time = time.time() - t1
+            prediction_tasks_seen += current_prediction_batch_size
+            progress_stats = progress.snapshot(completed_steps=epoch + 1)
+            prediction_tasks_completed = min(
+                prediction_tasks_before_run + prediction_tasks_seen,
+                planned_prediction_tasks,
+            )
+            task_progress_percent = (
+                100.0 * prediction_tasks_completed / planned_prediction_tasks
+            )
             mse_dict = {
                 f"train/mse_{j}": mse_mean[j].detach().item()
                 for j in range(mse_mean.shape[0])
             }
             if method_name == "psl_tamo":
                 mse_dict["train/stch_pred_mse"] = mse_mean[0].detach().item()
+                mse_dict["train/loss_stch_pred"] = loss_stch_pre_val
+                mse_dict["train/loss_objective_pred"] = loss_objective_val
+                mse_dict.update(
+                    {
+                        f"train/objective_mse_{j}": objective_mse_mean[j].item()
+                        for j in range(objective_mse_mean.shape[0])
+                    }
+                )
             log_dict = {
                 "train/epoch": epoch,
                 "train/loss_pre": loss_pre_val,
@@ -420,6 +546,11 @@ def train(
                 "train/step_reward_final": final_step_reward_mean,
                 "train/step_entropy_final": final_step_entropy_mean,
                 "train/epoch_time": epoch_time,
+                "train/progress_percent": progress_stats["percent"],
+                "train/task_progress_percent": task_progress_percent,
+                "train/eta_seconds": progress_stats["eta_seconds"],
+                "train/prediction_tasks_seen": prediction_tasks_seen,
+                "train/prediction_tasks_completed": prediction_tasks_completed,
                 "train/num_query_points": (
                     opt_cfg.num_query_points if epoch >= num_burnin_epochs else 0
                 ),
@@ -442,9 +573,17 @@ def train(
                 wandb.log(log_dict)
 
             # Logging
-            if epoch > 0 and epoch % log_cfg.freq_log == 0:
+            if (epoch > 0 and epoch % log_cfg.freq_log == 0) or (
+                epoch == num_total_epochs - 1
+            ):
                 line = (
-                    f"[epoch {epoch} / {num_total_epochs}] "
+                    f"[epoch {epoch + 1} / {num_total_epochs}; "
+                    f"{progress_stats['percent']:.2f}%] "
+                    f"tasks: {prediction_tasks_completed:,}/"
+                    f"{planned_prediction_tasks:,} ({task_progress_percent:.2f}%) "
+                    f"tasks_seen_this_run: {prediction_tasks_seen:,} "
+                    f"elapsed: {format_duration(progress_stats['elapsed_seconds'])} "
+                    f"ETA: {format_duration(progress_stats['eta_seconds'])} "
                     f"lr: {optimizer.param_groups[0]['lr']:.3e} "
                     f"[train] "
                     f"{ravg.info()}"
