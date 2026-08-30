@@ -487,16 +487,21 @@ def run_prediction(
             valid_x_counts = valid_x_counts.to(exp_cfg.device)
             valid_y_counts = valid_y_counts.to(exp_cfg.device)
 
-            x, y, x_mask, y_mask, nc = prepare_prediction_batches(
+            xc, yc, xt, yt, x_mask, y_mask = prepare_prediction_batches(
                 x=x, y=y, valid_x_counts=valid_x_counts, valid_y_counts=valid_y_counts,
                 dim_scatter_mode=data_cfg.dim_scatter_mode,
                 min_nc=pred_cfg.min_nc, max_nc=pred_cfg.max_nc, nc_fixed=pred_cfg.nc,
             )
+            nc = xc.shape[1]
 
-            ctx_kw = dict(model=model, x_ctx=x[:, :nc], y_ctx=y[:, :nc],
+            ctx_kw = dict(model=model, x_ctx=xc, y_ctx=yc,
                           x_mask=x_mask, y_mask=y_mask, read_cache=pred_cfg.read_cache)
-            nll_c, mse_c, _ = prediction_forward(**ctx_kw, x_tar=x[:, :nc], y_tar=y[:, :nc])
-            nll_t, mse_t, _ = prediction_forward(**ctx_kw, x_tar=x[:, nc:], y_tar=y[:, nc:])
+            nll_c, mse_c, _ = prediction_forward(
+                **ctx_kw, x_tar=xc, y_tar=yc
+            )
+            nll_t, mse_t, _ = prediction_forward(
+                **ctx_kw, x_tar=xt, y_tar=yt
+            )
 
             log_dict = {"nll_context": nll_c.detach().item(), "nll_target": nll_t.detach().item()}
             for j, (mc, mt) in enumerate(zip(mse_c, mse_t)):
@@ -506,9 +511,12 @@ def run_prediction(
             ravg.batch_update(log_dict)
 
             if log_cfg.plot_enabled and epoch == 0:
+                x_all = torch.cat((xc, xt), dim=1)
+                y_all = torch.cat((yc, yt), dim=1)
                 for pnc in (log_cfg.plot_nc_list or [nc]):
                     fig = plot_prediction_batch(
-                        model=model, nc=pnc, x=x, y=y, x_mask=x_mask, y_mask=y_mask,
+                        model=model, nc=pnc, x=x_all, y=y_all,
+                        x_mask=x_mask, y_mask=y_mask,
                         y_mask_tar=y_mask, read_cache=pred_cfg.read_cache,
                     )
                     save_fig(fig=fig, path=plot_save_path, config=pred_cfg, filename=f"nc{pnc}",

@@ -212,7 +212,7 @@ def prepare_prediction_batches(
     max_nc: int,
     nc_fixed: Optional[int] = None,
     warmup: bool = True,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, int]:
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     """Prepare prediction batch from full x, y tensors.
 
     Args:
@@ -227,11 +227,12 @@ def prepare_prediction_batches(
         warmup: Whether to use warmup when sampling nc
 
     Returns:
-        x: (Rearranged) x, [B, N, max_x_dim]
-        y: (Rearranged) y, [B, N, max_y_dim]
+        xc: Context inputs, [B, nc, max_x_dim]
+        yc: Context outputs, [B, nc, max_y_dim]
+        xt: Target inputs, [B, N - nc, max_x_dim]
+        yt: Target outputs, [B, N - nc, max_y_dim]
         x_mask: [B, max_x_dim] | [max_x_dim]
         y_mask: [B, max_y_dim] | [max_y_dim]
-        nc: Context size (int)
     """
     max_x_dim = x.shape[-1]
     max_y_dim = y.shape[-1]
