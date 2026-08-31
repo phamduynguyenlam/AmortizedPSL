@@ -1,0 +1,92 @@
+defaults:
+  - default
+  - data
+  - model
+  - _self_
+
+method:
+  name: psl_tamo
+
+extra:
+  ckpt_name: ckpt.tar
+  suffix_segment: psl_100plus100
+
+experiment:
+  seed: 0
+  mode: test
+  task: optimization
+  model_name: PSL_TAMO
+  device: cuda
+  expid: kaggle_psl_light
+  resume: true
+  override: true
+  log_to_wandb: false
+
+data:
+  function_name: dx2_dy2
+  data_id: null
+  scene: ship
+  dim_scatter_mode: random_k
+  sigma: 0.0
+  max_x_dim: 4
+  max_y_dim: 3
+
+optimization:
+  # Total function-evaluation budget is 100 initial + 100 PSL = 200.
+  num_initial_points: 100
+  T: 100
+  min_T: 100
+  max_T: 100
+  batch_size: 1
+  num_samples: 1
+  regret_type: ratio
+  use_grid_sampling: true
+  use_fixed_query_set: false
+  use_factorized_policy: false
+  use_time_budget: true
+  dim_mask_gen_mode: full
+  single_obs_x_dim: null
+  single_obs_y_dim: null
+  read_cache: false
+  write_cache: false
+  epsilon: 0.0
+  num_query_points: 64
+  use_logit_mask: false
+  sampling_mode: full
+
+scalarization:
+  type: smooth_tchebycheff
+  tau: 0.1
+  ideal_point: -1.0
+
+psl:
+  hidden_dim: 64
+  depth: 3
+  lr: 1e-3
+  init_steps: 20
+  update_steps: 1
+  num_train_preferences: 16
+  num_policy_preferences: 64
+  preference_method: dirichlet
+  log_every: 1
+
+# Must match the light checkpoint architecture exactly.
+model:
+  max_x_dim: 7
+  max_y_dim: 1
+  dim_mlp: 32
+  dim_attn: 32
+  nhead: 4
+  dropout: 0.0
+  num_layers_backbone: 2
+  num_layers_encoder: 2
+  num_layers_decoder: 2
+  ctx_prefix_encoder_layer: true
+  dim_hidden: 64
+  depth: 3
+  num_components: 5
+  use_ar: false
+  std_min: 1e-3
+  std_max: 1.0
+  single_mlp: false
+  use_missing_marker: false
