@@ -415,7 +415,12 @@ def train(
             loss_objective = None
             objective_mse_mean = None
             loss_objective_val = 0.0
+            # TAMO keeps its legacy burn-in weighting below. PSL-TAMO uses
+            # independently configurable coefficients for its scalar/STCH and
+            # true-objective prediction heads.
             prediction_loss = loss_pre
+            if objective_prediction_enabled:
+                prediction_loss = loss_cfg.loss_weight * loss_pre
             if objective_prediction_enabled:
                 loss_objective, objective_mse_mean, _ = prediction_forward(
                     model=model.objective_predictor,
@@ -439,7 +444,11 @@ def train(
             loss_pre_val = prediction_loss.detach().item()
 
             # Prediction loss backward and free up graph
-            if epoch >= num_burnin_epochs:
+            if objective_prediction_enabled:
+                # Both PSL prediction-head coefficients were already applied
+                # independently when constructing prediction_loss.
+                loss_weight = 1.0
+            elif epoch >= num_burnin_epochs:
                 loss_weight = loss_cfg.loss_weight
             else:
                 loss_weight = 1.0
@@ -496,11 +505,12 @@ def train(
                         T=T,
                         device=exp_cfg.device,
                     )
-                loss_acq_val = loss_acq.detach().item()
+                weighted_loss_acq = loss_cfg.policy_loss_weight * loss_acq
+                loss_acq_val = weighted_loss_acq.detach().item()
 
                 # optimization loss backward and free up graph
-                loss_acq.backward()
-                del loss_acq
+                weighted_loss_acq.backward()
+                del loss_acq, weighted_loss_acq
 
             # gradient clipping (must unscale before clipping)
             torch.nn.utils.clip_grad_norm_(

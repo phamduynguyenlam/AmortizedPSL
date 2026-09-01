@@ -75,6 +75,7 @@ class LossConfig:
     batch_standardize: bool = True
     clip_rewards: bool = True
     loss_weight: float = 1.0
+    policy_loss_weight: float = 1.0
     discount_factor: float = 0.99
     max_norm: float = 1.0
 
