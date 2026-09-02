@@ -42,7 +42,7 @@ optimization:
   use_grid_sampling: false
   use_fixed_query_set: false
   use_factorized_policy: false
-  use_time_budget: false
+  use_time_budget: true
   dim_mask_gen_mode: full
   single_obs_x_dim: null
   single_obs_y_dim: null
@@ -60,7 +60,6 @@ scalarization:
 
 utility:
   beta: 0.5
-  temperature: 1.0
 
 psl:
   hidden_dim: 256
@@ -71,10 +70,14 @@ psl:
   num_train_preferences: 10
   num_policy_preferences: 1000
   preference_method: dirichlet
+  inverse_steps: 10
+  inverse_lr: 5e-2
+  inverse_x_weight: 1.0
+  inverse_lambda_weight: 1.0
   log_every: 1
 
 model:
-  max_x_dim: 4
+  max_x_dim: 7
   max_y_dim: 3
   dim_mlp: 64
   dim_attn: 64

@@ -97,12 +97,14 @@ Check all available arguments in `configs/test.yaml`. For example:
 
 ### Objective-utility PSL-TAMO
 
-`psl_tamo_utility` uses a TAMO-style GMM surrogate to predict one LCB utility
-per objective. A separate, task-local PSL MLP maps preferences to decisions,
-`x=h_phi(lambda)`. Its parameters are updated through the frozen surrogate by
-the Monte-Carlo expected smooth Tchebycheff loss. Candidate selection also
-happens in preference space; this variant does not train a head that directly
-predicts `h(lambda)` and does not run the TAMO policy over the full domain.
+`psl_tamo_utility` uses one augmented TAMO network with an objective-wise GMM
+utility head and a categorical preference policy. A separate, task-local PSL
+MLP maps preferences to decisions, `x=h_phi(lambda)`, and is updated through
+the frozen utility head by Monte-Carlo expected smooth Tchebycheff. Preferences
+for old observations are fitted with
+`||x-h_phi(lambda)|| + ||lambda-lambda_star||`; the resulting `(x,y,lambda)`
+history is passed to TAMO. The policy selects the next preference and is
+meta-trained with REINFORCE, while the MLP supplies its decision candidate.
 
 Train the objective-utility surrogate:
 

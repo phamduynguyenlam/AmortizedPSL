@@ -45,6 +45,8 @@ from forwards import optimization_forward, prediction_forward
 from model import build_objective_predictor
 from psl_tamo.data import prepare_stch_prediction_batches
 from psl_tamo.forwards import optimization_forward_psl
+from psl_tamo.utility_forwards import optimization_forward_utility_psl
+from psl_tamo.utility_policy import augment_with_preferences
 from utils.wandb_wrapper import init as wandb_init, save_artifact
 
 
@@ -95,6 +97,7 @@ def main(config: DictConfig):
         method_name=config.get("method", {}).get("name", "tamo"),
         psl_config=config.get("psl", {}),
         scalarization_config=config.get("scalarization", {}),
+        utility_config=config.get("utility", {}),
         objective_prediction_config=config.get("objective_prediction", {}),
         log=log,
     )
@@ -113,6 +116,7 @@ def train(
     method_name: str = "tamo",
     psl_config=None,
     scalarization_config=None,
+    utility_config=None,
     objective_prediction_config=None,
     log: callable = print,
 ):
@@ -121,6 +125,7 @@ def train(
     log(f"seed:\t{exp_cfg.seed}")
     psl_config = psl_config or {}
     scalarization_config = scalarization_config or {}
+    utility_config = utility_config or {}
     objective_prediction_config = objective_prediction_config or {}
 
     # ===============================================
@@ -185,11 +190,11 @@ def train(
     model = build_tamo(model_kwargs)
     utility_psl_enabled = method_name == "psl_tamo_utility"
     if utility_psl_enabled:
-        # This method has one objective-wise TAMO/GMM utility model.  h_phi is
-        # task-local and intentionally is not a checkpointed prediction head.
+        # One augmented TAMO jointly supplies the objective utility head and
+        # the preference-selection policy head. h_theta remains task-local.
         model = build_objective_predictor(
             scalar_tamo_config=model.config,
-            max_x_dim=data_cfg.max_x_dim,
+            max_x_dim=data_cfg.max_x_dim + data_cfg.max_y_dim,
             max_y_dim=data_cfg.max_y_dim,
         )
     objective_prediction_enabled = method_name == "psl_tamo"
@@ -213,7 +218,7 @@ def train(
                 + "\n  ".join(unexpected)
             )
 
-    model_label = "TAMO objective-utility surrogate" if utility_psl_enabled else "TAMO"
+    model_label = "TAMO objective-utility preference policy" if utility_psl_enabled else "TAMO"
     log(
         f"==== Model built: {model_label} ====\n"
         f"  Config: {model.config}\n"
@@ -404,6 +409,11 @@ def train(
                     max_nc=pred_cfg.max_nc,
                     warmup=epoch <= num_context_size_burnin_epochs,
                 )
+                if utility_psl_enabled:
+                    xc, xt, x_mask = augment_with_preferences(
+                        xc, xt, x_mask, y_mask,
+                        psl_config.get("preference_method", "dirichlet"),
+                    )
 
             # ===============================================
             # Forwards
@@ -454,10 +464,13 @@ def train(
             loss_pre_val = prediction_loss.detach().item()
 
             # Prediction loss backward and free up graph
-            if objective_prediction_enabled:
+            if objective_prediction_enabled or utility_psl_enabled:
                 # Both PSL prediction-head coefficients were already applied
-                # independently when constructing prediction_loss.
-                loss_weight = 1.0
+                # independently. Utility-PSL has one objective loss weighted
+                # like the prediction term of PSL-TAMO.
+                loss_weight = (
+                    1.0 if objective_prediction_enabled else loss_cfg.loss_weight
+                )
             elif epoch >= num_burnin_epochs:
                 loss_weight = loss_cfg.loss_weight
             else:
@@ -482,7 +495,7 @@ def train(
             psl_stats = {}
             T = 0
 
-            if epoch >= num_burnin_epochs and not utility_psl_enabled:
+            if epoch >= num_burnin_epochs:
                 T = opt_cfg.sample_T()
                 if method_name == "psl_tamo":
                     (
@@ -498,6 +511,24 @@ def train(
                         loss_config=loss_cfg,
                         psl_config=psl_config,
                         scalarization_config=scalarization_config,
+                        T=T,
+                        device=exp_cfg.device,
+                    )
+                elif utility_psl_enabled:
+                    (
+                        loss_acq,
+                        step_reward_mean,
+                        final_step_reward_mean,
+                        final_step_entropy_mean,
+                        psl_stats,
+                    ) = optimization_forward_utility_psl(
+                        model=model,
+                        data_cfg=data_cfg,
+                        opt_config=opt_cfg,
+                        loss_config=loss_cfg,
+                        psl_config=psl_config,
+                        scalarization_config=scalarization_config,
+                        utility_config=utility_config,
                         T=T,
                         device=exp_cfg.device,
                     )

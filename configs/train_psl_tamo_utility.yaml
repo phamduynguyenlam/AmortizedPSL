@@ -17,11 +17,11 @@ experiment:
   override: false
   log_to_wandb: true
 
-# This checkpoint learns only the TAMO-style objective utility surrogate.
-# h_phi is initialized and optimized per task at evaluation time.
+# The augmented TAMO jointly learns objective utilities and a preference policy.
+# h_phi remains task-local, while the policy is meta-trained with REINFORCE.
 train:
   num_total_epochs: 400000
-  num_burnin_epochs: 400000
+  num_burnin_epochs: 392000
   nc_burnin_ratio: 0.7
   lr1: 1e-3
   lr2: 4e-5
@@ -36,8 +36,9 @@ loss:
   use_cumulative_rewards: true
   batch_standardize: true
   clip_rewards: true
-  loss_weight: 1.0
-  policy_loss_weight: 0.0
+  # Objective utility prediction coefficient; policy coefficient is below.
+  loss_weight: 0.5
+  policy_loss_weight: 1.0
   discount_factor: 0.99
   max_norm: 1.0
 
@@ -48,28 +49,26 @@ prediction:
   max_nc: 50
   read_cache: false
 
-# Required by the shared train schema; no REINFORCE rollout is run for this
-# method because utility NLL trains TAMO and expected STCH updates task-local h.
 optimization:
   use_grid_sampling: false
-  use_fixed_query_set: false
+  use_fixed_query_set: true
   use_factorized_policy: false
-  use_time_budget: false
-  batch_size: 1
-  num_samples: 1
+  use_time_budget: true
+  batch_size: 4
+  num_samples: 4
   num_query_points: 256
-  num_initial_points: 10
+  num_initial_points: 1
   random_num_initial: false
-  T: 1
-  min_T: 1
-  max_T: 1
+  T: 100
+  min_T: 20
+  max_T: 100
   regret_type: norm_ratio
   dim_mask_gen_mode: full
   single_obs_x_dim: null
   single_obs_y_dim: null
   read_cache: false
   write_cache: false
-  epsilon: 0.0
+  epsilon: 1.0
   use_curriculum: false
   use_logit_mask: false
   sampling_mode: full
@@ -82,7 +81,6 @@ scalarization:
 utility:
   # PSL paper's objective-wise LCB: mean - beta * std.
   beta: 0.5
-  temperature: 1.0
 
 # Original PSL-MOBO MLP: m -> 256 -> 256 -> d, Adam lr=1e-3,
 # K=10 preferences per Monte-Carlo gradient step.
@@ -95,6 +93,10 @@ psl:
   num_train_preferences: 10
   num_policy_preferences: 1000
   preference_method: dirichlet
+  inverse_steps: 10
+  inverse_lr: 5e-2
+  inverse_x_weight: 1.0
+  inverse_lambda_weight: 1.0
 
 log:
   freq_log: 200
@@ -103,9 +105,9 @@ log:
   freq_save_extra: 5000
   freq_log_grad: 1000
 
-# Unlike scalar PSL-TAMO, max_y_dim is the true objective dimension.
+# Augmented history input is [x, lambda], output/history y is objective-wise.
 model:
-  max_x_dim: 4
+  max_x_dim: 7
   max_y_dim: 3
   dim_mlp: 64
   dim_attn: 64

@@ -54,7 +54,7 @@ def main(config: DictConfig):
     base_model = build_tamo(dict(config.model))
     model = build_objective_predictor(
         scalar_tamo_config=base_model.config,
-        max_x_dim=data_cfg.max_x_dim,
+        max_x_dim=data_cfg.max_x_dim + data_cfg.max_y_dim,
         max_y_dim=data_cfg.max_y_dim,
     )
     model.load_state_dict(checkpoint["model"], strict=True)
