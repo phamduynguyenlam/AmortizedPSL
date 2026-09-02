@@ -95,6 +95,35 @@ Check all available arguments in `configs/test.yaml`. For example:
    suffix_segment=decoupled
    ```
 
+### Objective-utility PSL-TAMO
+
+`psl_tamo_utility` uses a TAMO-style GMM surrogate to predict one LCB utility
+per objective. A separate, task-local PSL MLP maps preferences to decisions,
+`x=h_phi(lambda)`. Its parameters are updated through the frozen surrogate by
+the Monte-Carlo expected smooth Tchebycheff loss. Candidate selection also
+happens in preference space; this variant does not train a head that directly
+predicts `h(lambda)` and does not run the TAMO policy over the full domain.
+
+Train the objective-utility surrogate:
+
+```bash
+python train.py --config-name=train_psl_tamo_utility \
+  experiment.expid=utility_psl
+```
+
+Run a `100 initial + 100 sequential` evaluation:
+
+```bash
+python test_utility_psl.py --config-name=test_psl_tamo_utility \
+  experiment.expid=utility_psl \
+  data.function_name=dx2_dy2
+```
+
+The default PSL settings reproduce the original model size and inner-loop
+settings (`m -> 256 -> 256 -> d`, Adam `1e-3`, 10 preferences and 1000 update
+steps). For a quick smoke test, override `psl.init_steps`, `psl.update_steps`,
+and `psl.num_policy_preferences` with smaller values.
+
 Test function classes and result saving paths are detailed below.
 ### Test functions
 `data/function.py` implements test function classes, where: 

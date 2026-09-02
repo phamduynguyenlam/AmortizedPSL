@@ -183,6 +183,15 @@ def train(
     # Setup model
     # ===============================================
     model = build_tamo(model_kwargs)
+    utility_psl_enabled = method_name == "psl_tamo_utility"
+    if utility_psl_enabled:
+        # This method has one objective-wise TAMO/GMM utility model.  h_phi is
+        # task-local and intentionally is not a checkpointed prediction head.
+        model = build_objective_predictor(
+            scalar_tamo_config=model.config,
+            max_x_dim=data_cfg.max_x_dim,
+            max_y_dim=data_cfg.max_y_dim,
+        )
     objective_prediction_enabled = method_name == "psl_tamo"
     if objective_prediction_enabled:
         model.objective_predictor = build_objective_predictor(
@@ -204,8 +213,9 @@ def train(
                 + "\n  ".join(unexpected)
             )
 
+    model_label = "TAMO objective-utility surrogate" if utility_psl_enabled else "TAMO"
     log(
-        f"==== Model built: TAMO ====\n"
+        f"==== Model built: {model_label} ====\n"
         f"  Config: {model.config}\n"
         f"  Parameters: {sum(p.numel() for p in model.parameters()):,}"
     )
@@ -472,7 +482,7 @@ def train(
             psl_stats = {}
             T = 0
 
-            if epoch >= num_burnin_epochs:
+            if epoch >= num_burnin_epochs and not utility_psl_enabled:
                 T = opt_cfg.sample_T()
                 if method_name == "psl_tamo":
                     (

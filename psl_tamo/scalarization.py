@@ -29,3 +29,20 @@ def smooth_tchebycheff(
         values = values.masked_fill(~mask, float("-inf"))
 
     return tau * torch.logsumexp(values, dim=-1, keepdim=True)
+
+
+def expected_smooth_tchebycheff_loss(
+    y: Tensor,
+    lambdas: Tensor,
+    ideal_point: Tensor | float,
+    tau: float,
+    mask: Tensor | None = None,
+) -> Tensor:
+    """Monte-Carlo estimate of ``E_lambda[g_STCH(h(lambda) | lambda)]``."""
+    return smooth_tchebycheff(
+        y=y,
+        lambdas=lambdas,
+        ideal_point=ideal_point,
+        tau=tau,
+        mask=mask,
+    ).mean()

@@ -35,6 +35,35 @@ class ObjectiveValuePredictor(TAMO):
         )
         return GMMPredictionHead.expected_value(output)
 
+    def predictive_utility(
+        self,
+        x_ctx: Tensor,
+        y_ctx: Tensor,
+        x_tar: Tensor,
+        x_mask: Tensor,
+        y_mask: Tensor,
+        beta: float = 0.0,
+    ) -> Tensor:
+        """Return an objective-wise optimistic utility for minimization.
+
+        ``beta=0`` gives the posterior mixture mean. Positive ``beta`` uses
+        the lower-confidence-bound convention from the original PSL paper,
+        ``E[f_i(x)] - beta * Std[f_i(x)]``. The operation remains fully
+        differentiable with respect to ``x_tar``.
+        """
+        output = self.predict(
+            x_ctx=x_ctx,
+            y_ctx=y_ctx,
+            x_tar=x_tar,
+            x_mask=x_mask,
+            y_mask=y_mask,
+            read_cache=False,
+        )
+        mean = GMMPredictionHead.expected_value(output)
+        if beta == 0.0:
+            return mean
+        return mean - float(beta) * GMMPredictionHead.std(output)
+
 
 def build_objective_predictor(
     scalar_tamo_config: TAMOConfig,
