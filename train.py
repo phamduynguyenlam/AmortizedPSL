@@ -42,9 +42,9 @@ from utils.config import (
 )
 from utils.seed import set_all_seeds
 from forwards import optimization_forward, prediction_forward
-from model import build_objective_predictor
+from model import build_apsl_head, build_objective_predictor
 from psl_tamo.data import prepare_stch_prediction_batches
-from psl_tamo.forwards import optimization_forward_psl
+from psl_tamo.forwards import optimization_forward_apsl
 from psl_tamo.utility_forwards import optimization_forward_utility_psl
 from psl_tamo.utility_policy import augment_with_preferences
 from utils.wandb_wrapper import init as wandb_init, save_artifact
@@ -95,7 +95,7 @@ def main(config: DictConfig):
         loss_cfg=loss_cfg,
         log_cfg=log_cfg,
         method_name=config.get("method", {}).get("name", "tamo"),
-        psl_config=config.get("psl", {}),
+        psl_config=config.get("apsl", config.get("psl", {})),
         scalarization_config=config.get("scalarization", {}),
         utility_config=config.get("utility", {}),
         objective_prediction_config=config.get("objective_prediction", {}),
@@ -197,12 +197,19 @@ def train(
             max_x_dim=data_cfg.max_x_dim + data_cfg.max_y_dim,
             max_y_dim=data_cfg.max_y_dim,
         )
-    objective_prediction_enabled = method_name == "psl_tamo"
+    apsl_enabled = method_name in {"apsl", "psl_tamo"}
+    objective_prediction_enabled = apsl_enabled
     if objective_prediction_enabled:
         model.objective_predictor = build_objective_predictor(
             scalar_tamo_config=model.config,
             max_x_dim=data_cfg.max_x_dim,
             max_y_dim=data_cfg.max_y_dim,
+        )
+        model.apsl_head = build_apsl_head(
+            tamo_config=model.config,
+            max_x_dim=data_cfg.max_x_dim,
+            max_y_dim=data_cfg.max_y_dim,
+            x_range=data_cfg.x_range,
         )
     model = model.to(exp_cfg.device)
     if model_state_dict:
@@ -230,6 +237,11 @@ def train(
             f"  Config: {model.objective_predictor.config}\n"
             f"  Parameters: "
             f"{sum(p.numel() for p in model.objective_predictor.parameters()):,}"
+        )
+        log(
+            f"==== APSL head enabled ====\n"
+            f"  Type: deterministic x = h(H, lambda)\n"
+            f"  Parameters: {sum(p.numel() for p in model.apsl_head.parameters()):,}"
         )
 
     if exp_cfg.log_to_wandb:
@@ -281,6 +293,17 @@ def train(
         completed_at_start * pred_cfg.batch_size,
         planned_prediction_tasks,
     )
+    run_started_at = time.perf_counter()
+    epochs_completed_this_run = 0
+    burnin_epochs_this_run = 0
+    policy_epochs_this_run = 0
+    burnin_seconds_this_run = 0.0
+    policy_seconds_this_run = 0.0
+
+    def synchronize_training_device():
+        """Make CUDA timing include kernels queued by the current epoch."""
+        if str(exp_cfg.device).startswith("cuda") and torch.cuda.is_available():
+            torch.cuda.synchronize()
 
     # Repeat dataset if the requested steps exceed one complete dataset pass.
     batches_per_dataset = max(1, math.ceil(dataset_size / pred_cfg.batch_size))
@@ -353,7 +376,8 @@ def train(
             if epoch == num_context_size_burnin_epochs:
                 log(f"Start training on prediction batches of random context size.")
 
-            t1 = time.time()
+            synchronize_training_device()
+            epoch_started_at = time.perf_counter()
 
             model.train()
             optimizer.zero_grad()
@@ -367,7 +391,7 @@ def train(
             valid_y_counts = valid_y_counts.to(exp_cfg.device)  # [B]
 
             # Prediction batch: (xc, yc, xt, yt)
-            if method_name == "psl_tamo":
+            if apsl_enabled:
                 (
                     obj_xc,
                     obj_yc,
@@ -435,7 +459,7 @@ def train(
             loss_objective = None
             objective_mse_mean = None
             loss_objective_val = 0.0
-            # TAMO keeps its legacy burn-in weighting below. PSL-TAMO uses
+            # TAMO keeps its legacy burn-in weighting below. APSL uses
             # independently configurable coefficients for its scalar/STCH and
             # true-objective prediction heads.
             prediction_loss = loss_pre
@@ -467,7 +491,7 @@ def train(
             if objective_prediction_enabled or utility_psl_enabled:
                 # Both PSL prediction-head coefficients were already applied
                 # independently. Utility-PSL has one objective loss weighted
-                # like the prediction term of PSL-TAMO.
+                # like the prediction term of APSL.
                 loss_weight = (
                     1.0 if objective_prediction_enabled else loss_cfg.loss_weight
                 )
@@ -489,6 +513,7 @@ def train(
 
             # Optimization forward (model + loss)
             loss_acq_val = 0.0
+            loss_apsl_val = 0.0
             step_reward_mean = 0.0
             final_step_reward_mean = 0.0
             final_step_entropy_mean = 0.0
@@ -497,14 +522,16 @@ def train(
 
             if epoch >= num_burnin_epochs:
                 T = opt_cfg.sample_T()
-                if method_name == "psl_tamo":
+                apsl_loss = None
+                if apsl_enabled:
                     (
                         loss_acq,
+                        apsl_loss,
                         step_reward_mean,
                         final_step_reward_mean,
                         final_step_entropy_mean,
                         psl_stats,
-                    ) = optimization_forward_psl(
+                    ) = optimization_forward_apsl(
                         model=model,
                         data_cfg=data_cfg,
                         opt_config=opt_cfg,
@@ -547,11 +574,19 @@ def train(
                         device=exp_cfg.device,
                     )
                 weighted_loss_acq = loss_cfg.policy_loss_weight * loss_acq
+                if apsl_loss is not None:
+                    weighted_apsl_loss = (
+                        psl_config.get("loss_weight", 0.5) * apsl_loss
+                    )
+                    weighted_loss_acq = weighted_loss_acq + weighted_apsl_loss
+                    loss_apsl_val = weighted_apsl_loss.detach().item()
                 loss_acq_val = weighted_loss_acq.detach().item()
 
                 # optimization loss backward and free up graph
                 weighted_loss_acq.backward()
                 del loss_acq, weighted_loss_acq
+                if apsl_loss is not None:
+                    del apsl_loss, weighted_apsl_loss
 
             # gradient clipping (must unscale before clipping)
             torch.nn.utils.clip_grad_norm_(
@@ -563,7 +598,15 @@ def train(
             # ===============================================
             # Tracking and Logging
             # ===============================================
-            epoch_time = time.time() - t1
+            synchronize_training_device()
+            epoch_time = time.perf_counter() - epoch_started_at
+            epochs_completed_this_run += 1
+            if epoch < num_burnin_epochs:
+                burnin_epochs_this_run += 1
+                burnin_seconds_this_run += epoch_time
+            else:
+                policy_epochs_this_run += 1
+                policy_seconds_this_run += epoch_time
             prediction_tasks_seen += current_prediction_batch_size
             progress_stats = progress.snapshot(completed_steps=epoch + 1)
             prediction_tasks_completed = min(
@@ -577,7 +620,7 @@ def train(
                 f"train/mse_{j}": mse_mean[j].detach().item()
                 for j in range(mse_mean.shape[0])
             }
-            if method_name == "psl_tamo":
+            if apsl_enabled:
                 mse_dict["train/stch_pred_mse"] = mse_mean[0].detach().item()
                 mse_dict["train/loss_stch_pred"] = loss_stch_pre_val
                 mse_dict["train/loss_objective_pred"] = loss_objective_val
@@ -591,6 +634,7 @@ def train(
                 "train/epoch": epoch,
                 "train/loss_pre": loss_pre_val,
                 "train/loss_acq": loss_acq_val,
+                "train/loss_apsl": loss_apsl_val,
                 "train/loss": loss_pre_val + loss_acq_val,
                 "train/learning_rate": optimizer.param_groups[0]["lr"],
                 "train/step_reward": step_reward_mean,
@@ -676,6 +720,33 @@ def train(
                             type="model",
                             log=log,
                         )
+
+    synchronize_training_device()
+    run_wall_seconds = time.perf_counter() - run_started_at
+    measured_epoch_seconds = burnin_seconds_this_run + policy_seconds_this_run
+
+    def phase_line(name: str, count: int, seconds: float) -> str:
+        average = seconds / count if count else 0.0
+        return (
+            f"  {name}:\t{count} epochs, {format_duration(seconds)} "
+            f"({seconds:.3f}s), avg {average:.3f}s/epoch"
+        )
+
+    log(
+        "==== Training time summary (current invocation only) ====\n"
+        f"  method:\t{method_name}\n"
+        f"  resumed from completed epochs:\t{completed_at_start}\n"
+        f"  epochs completed this invocation:\t{epochs_completed_this_run}\n"
+        + phase_line("burn-in", burnin_epochs_this_run, burnin_seconds_this_run)
+        + "\n"
+        + phase_line("policy/RL", policy_epochs_this_run, policy_seconds_this_run)
+        + "\n"
+        f"  measured epoch compute:\t{format_duration(measured_epoch_seconds)} "
+        f"({measured_epoch_seconds:.3f}s)\n"
+        f"  training-loop wall clock:\t{format_duration(run_wall_seconds)} "
+        f"({run_wall_seconds:.3f}s)\n"
+        "========================================================="
+    )
 
 
 if __name__ == "__main__":

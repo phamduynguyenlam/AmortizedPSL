@@ -5,7 +5,8 @@ defaults:
   - _self_
 
 method:
-  name: psl_tamo
+  # Legacy filename; the algorithm is now named APSL.
+  name: apsl
 
 extra:
   ckpt_name: ckpt.tar
@@ -15,7 +16,7 @@ experiment:
   seed: 0
   mode: test
   task: optimization
-  model_name: PSL_TAMO
+  model_name: APSL
   device: cuda
   expid: kaggle_psl_light
   resume: true
@@ -59,12 +60,8 @@ scalarization:
   tau: 0.1
   ideal_point: -1.0
 
-psl:
-  hidden_dim: 64
-  depth: 3
-  lr: 1e-3
-  init_steps: 20
-  update_steps: 1
+apsl:
+  loss_weight: 0.5
   num_train_preferences: 16
   num_policy_preferences: 64
   preference_method: dirichlet

@@ -95,6 +95,29 @@ Check all available arguments in `configs/test.yaml`. For example:
    suffix_segment=decoupled
    ```
 
+### APSL
+
+The former experimental name `PSL-TAMO` is now **APSL** (Amortized Pareto
+Set Learning). APSL has a persistent, history-conditioned decoder head
+`x=h(H, lambda)` inside the checkpointed model. It embeds each preference,
+cross-attends to the encoded `(x,y)` history, and predicts every decision
+dimension through a shared deterministic head. Its expected smooth
+Tchebycheff loss updates the APSL branch while the objective predictor is
+frozen; the preference utility policy is still meta-trained with REINFORCE.
+
+```bash
+python train.py --config-name=train_apsl experiment.expid=kaggle_apsl_medium
+
+python test_apsl.py --config-name=test_apsl \
+  experiment.expid=kaggle_apsl_medium \
+  data.function_name=dx2_dy2
+```
+
+`configs/train_psl_tamo.yaml` and `test_psl.py` remain compatibility entry
+points, but new experiments should use the APSL names above. Old PSL-TAMO
+checkpoints do not contain `apsl_head` and therefore cannot be used as trained
+APSL checkpoints.
+
 ### Objective-utility PSL-TAMO
 
 `psl_tamo_utility` uses one augmented TAMO network with an objective-wise GMM

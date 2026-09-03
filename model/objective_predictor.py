@@ -1,4 +1,4 @@
-"""Objective-wise surrogate used by PSL-TAMO.
+"""Objective-wise surrogate used by APSL.
 
 The implementation deliberately reuses TAMO's original prediction stack so the
 objective surrogate keeps the same dimension-wise embeddings, transformer, and
@@ -15,6 +15,30 @@ from .tamo import TAMO, TAMOConfig
 
 class ObjectiveValuePredictor(TAMO):
     """TAMO predictor specialized to true decision/objective observations."""
+
+    def encode_history(
+        self,
+        x_ctx: Tensor,
+        y_ctx: Tensor,
+        x_mask: Tensor,
+        y_mask: Tensor,
+    ):
+        """Encode observed ``(x, y)`` pairs for another decoder branch."""
+        tokens, x_ids, y_ids = self._make_tokens(
+            x=x_ctx,
+            y=y_ctx,
+            x_mask=x_mask,
+            y_mask=y_mask,
+        )
+        num_context = tokens.shape[1]
+        attention_mask = self.transformer_block.make_attention_mask(
+            x_mask, num_context, num_context
+        )
+        return (
+            self.transformer_block(tokens, mask=attention_mask),
+            x_ids,
+            y_ids,
+        )
 
     def predictive_mean(
         self,

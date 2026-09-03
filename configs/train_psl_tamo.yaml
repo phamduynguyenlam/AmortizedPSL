@@ -5,12 +5,13 @@ defaults:
   - _self_
 
 method:
-  name: psl_tamo
+  # Legacy filename; the algorithm is now named APSL.
+  name: apsl
 
 experiment:
   seed: 0
   mode: train
-  model_name: PSL_TAMO
+  model_name: APSL
   device: cuda
   expid: null
   resume: false
@@ -90,12 +91,9 @@ log:
   freq_save_extra: 5000
   freq_log_grad: 1000
 
-psl:
-  hidden_dim: 128
-  depth: 3
-  lr: 1e-3
-  init_steps: 50
-  update_steps: 5
+apsl:
+  # Deterministic checkpointed head x=h(H, lambda), not a task-local MLP.
+  loss_weight: 0.5
   num_train_preferences: 64
   num_policy_preferences: 256
   preference_method: dirichlet

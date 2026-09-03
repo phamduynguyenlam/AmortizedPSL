@@ -1,4 +1,4 @@
-"""Deployment-time PSL-TAMO rollout on a real test function."""
+"""Deployment-time APSL rollout on a real test function."""
 
 from __future__ import annotations
 
@@ -11,17 +11,16 @@ import torch
 from torch import Tensor
 
 from data.base.masking import restore_by_mask
-from model import ParetoSetMLP, TAMO
+from model import TAMO
 from utils.log import format_duration
-from .forwards import select_next_preference
+from .forwards import generate_apsl_solutions, select_next_preference
 from .preferences import sample_padded_preferences
-from .psl_inner_loop import update_psl_inner_loop
 from .scalarization import smooth_tchebycheff
 
 
 @dataclass
-class PSLRolloutResult:
-    """Tensors produced by a PSL-TAMO deployment rollout."""
+class APSLRolloutResult:
+    """Tensors produced by an APSL deployment rollout."""
 
     hv: Tensor
     x_context: Tensor
@@ -30,7 +29,7 @@ class PSLRolloutResult:
     y_queries: Tensor
     preferences: Tensor
     entropy: Tensor
-    psl_loss: Tensor
+    apsl_loss: Tensor
 
     def to_cpu_dict(self) -> dict[str, Tensor]:
         return {
@@ -55,7 +54,7 @@ def _format_batch(values: Tensor) -> str:
     return ", ".join(f"{value:.6f}" for value in values.detach().cpu().tolist())
 
 
-def run_psl_optimization(
+def run_apsl_optimization(
     model: TAMO,
     test_function,
     data_config,
@@ -65,7 +64,7 @@ def run_psl_optimization(
     device: str,
     seed: int,
     log: callable = print,
-) -> PSLRolloutResult:
+) -> APSLRolloutResult:
     """Run ``N_init + T`` function evaluations and report TAMO-compatible HV.
 
     Hypervolume is always computed from unscaled, true objective observations by
@@ -74,7 +73,9 @@ def run_psl_optimization(
     """
     objective_model = getattr(model, "objective_predictor", None)
     if objective_model is None:
-        raise ValueError("PSL-TAMO checkpoint must contain an objective predictor")
+        raise ValueError("APSL checkpoint must contain an objective predictor")
+    if getattr(model, "apsl_head", None) is None:
+        raise ValueError("APSL checkpoint must contain an amortized Pareto-set head")
 
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -124,75 +125,27 @@ def run_psl_optimization(
         y_model, lambdas_context, ideal_point.unsqueeze(1), tau, objective_mask
     )
 
-    lower, upper = data_config.x_range
-    psl_models = [
-        ParetoSetMLP(
-            preference_dim=max_y_dim,
-            decision_dim=max_x_dim,
-            hidden_dim=psl_config.get("hidden_dim", 128),
-            depth=psl_config.get("depth", 3),
-            x_lower=lower,
-            x_upper=upper,
-        ).to(device)
-        for _ in range(batch_size)
-    ]
-    psl_optimizers = [
-        torch.optim.Adam(psl.parameters(), lr=psl_config.get("lr", 1e-3))
-        for psl in psl_models
-    ]
-
     model = model.to(device)
     model.eval()
-    psl_loss = update_psl_inner_loop(
-        psl_models=psl_models,
-        psl_optimizers=psl_optimizers,
-        objective_model=objective_model,
-        x_ctx=x_model,
-        y_ctx=y_model,
-        x_mask=x_mask,
-        objective_mask=objective_mask,
-        ideal_point=ideal_point,
-        tau=tau,
-        num_preferences=psl_config.get("num_train_preferences", 64),
-        num_steps=psl_config.get("init_steps", 50),
-        preference_method=preference_method,
-    )
 
     hv_history = [hv.detach().clone()]
     x_queries, y_queries, selected_preferences = [], [], []
-    entropy_history, psl_loss_history = [], [psl_loss]
+    entropy_history, apsl_loss_history = [], []
     max_hv = torch.as_tensor(
         test_function.max_hv, device=device, dtype=hv.dtype
     ).expand_as(hv)
     total_evaluations = num_initial + horizon
     started_at = time.time()
     log(
-        "==== PSL-TAMO evaluation budget ====\n"
+        "==== APSL evaluation budget ====\n"
         f"  initial evaluations:\t{num_initial}\n"
-        f"  PSL evaluations:\t{horizon}\n"
+        f"  APSL evaluations:\t{horizon}\n"
         f"  total evaluations:\t{total_evaluations}\n"
         f"  initial HV:\t{_format_batch(hv)}\n"
         f"  max HV:\t{_format_batch(max_hv)}"
     )
 
     for step in range(1, horizon + 1):
-        update_steps = psl_config.get("update_steps", 5)
-        if update_steps > 0:
-            psl_loss = update_psl_inner_loop(
-                psl_models=psl_models,
-                psl_optimizers=psl_optimizers,
-                objective_model=objective_model,
-                x_ctx=x_model,
-                y_ctx=y_model,
-                x_mask=x_mask,
-                objective_mask=objective_mask,
-                ideal_point=ideal_point,
-                tau=tau,
-                num_preferences=psl_config.get("num_train_preferences", 64),
-                num_steps=update_steps,
-                preference_method=preference_method,
-            )
-
         lambdas = sample_padded_preferences(
             objective_mask,
             psl_config.get("num_policy_preferences", 256),
@@ -200,9 +153,23 @@ def run_psl_optimization(
             x_model.dtype,
         )
         with torch.no_grad():
-            x_candidates = torch.stack(
-                [psl(lambdas[b]) for b, psl in enumerate(psl_models)]
+            x_candidates = generate_apsl_solutions(
+                model, x_model, y_model, lambdas, x_mask, objective_mask
             )
+            predicted_candidates = objective_model.predictive_mean(
+                x_ctx=x_model,
+                y_ctx=y_model,
+                x_tar=x_candidates,
+                x_mask=x_mask,
+                y_mask=objective_mask,
+            )
+            apsl_loss = smooth_tchebycheff(
+                predicted_candidates,
+                lambdas,
+                ideal_point.unsqueeze(1),
+                tau,
+                objective_mask,
+            ).mean()
             z_candidates = torch.cat((x_candidates, lambdas), dim=-1)
             action = select_next_preference(
                 model=model,
@@ -253,21 +220,21 @@ def run_psl_optimization(
         y_queries.append(y_next.detach())
         selected_preferences.append(selected_lambda.detach())
         entropy_history.append(action.entropy.detach())
-        psl_loss_history.append(psl_loss)
+        apsl_loss_history.append(apsl_loss.detach())
 
         elapsed = time.time() - started_at
         eta = elapsed / step * (horizon - step)
         hv_ratio = hv / max_hv.clamp_min(1e-12)
         if step == 1 or step == horizon or step % psl_config.get("log_every", 1) == 0:
             log(
-                f"[PSL step {step:03d}/{horizon}; FE {num_initial + step}/"
+                f"[APSL step {step:03d}/{horizon}; FE {num_initial + step}/"
                 f"{total_evaluations}] HV={_format_batch(hv)} "
                 f"HV/maxHV={_format_batch(hv_ratio)} "
-                f"PSL-loss={psl_loss:.6f} elapsed={format_duration(elapsed)} "
+                f"APSL-loss={apsl_loss.item():.6f} elapsed={format_duration(elapsed)} "
                 f"ETA={format_duration(eta)}"
             )
 
-    result = PSLRolloutResult(
+    result = APSLRolloutResult(
         hv=torch.stack(hv_history, dim=1),
         x_context=x_context,
         y_context=y_context,
@@ -275,11 +242,11 @@ def run_psl_optimization(
         y_queries=torch.cat(y_queries, dim=1),
         preferences=torch.cat(selected_preferences, dim=1),
         entropy=torch.stack(entropy_history, dim=1),
-        psl_loss=torch.as_tensor(psl_loss_history, dtype=torch.float32),
+        apsl_loss=torch.stack(apsl_loss_history),
     )
     final_ratio = result.hv[:, -1] / max_hv.clamp_min(1e-12)
     log(
-        "==== PSL-TAMO final HV ====\n"
+        "==== APSL final HV ====\n"
         f"  evaluations:\t{total_evaluations}\n"
         f"  final HV:\t{_format_batch(result.hv[:, -1])}\n"
         f"  final HV / max HV:\t{_format_batch(final_ratio)}"
@@ -287,10 +254,16 @@ def run_psl_optimization(
     return result
 
 
-def save_psl_rollout(result: PSLRolloutResult, output_dir: str, log=print) -> str:
+def save_apsl_rollout(result: APSLRolloutResult, output_dir: str, log=print) -> str:
     """Save one self-contained rollout artifact."""
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, "psl_rollout.pt")
+    output_path = os.path.join(output_dir, "apsl_rollout.pt")
     torch.save(result.to_cpu_dict(), output_path)
-    log(f"PSL rollout saved to:\t{output_path}")
+    log(f"APSL rollout saved to:\t{output_path}")
     return output_path
+
+
+# Compatibility aliases for callers of the former experimental name.
+PSLRolloutResult = APSLRolloutResult
+run_psl_optimization = run_apsl_optimization
+save_psl_rollout = save_apsl_rollout

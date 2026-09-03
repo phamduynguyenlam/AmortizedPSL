@@ -1,0 +1,40 @@
+defaults:
+  - test_apsl
+  - _self_
+
+method:
+  name: apsl
+
+experiment:
+  model_name: APSL
+  expid: kaggle_apsl_light
+
+extra:
+  suffix_segment: apsl_light
+
+apsl:
+  loss_weight: 0.5
+  num_train_preferences: 16
+  num_policy_preferences: 64
+  preference_method: dirichlet
+  log_every: 1
+
+model:
+  max_x_dim: 7
+  max_y_dim: 1
+  dim_mlp: 32
+  dim_attn: 32
+  nhead: 4
+  dropout: 0.0
+  num_layers_backbone: 2
+  num_layers_encoder: 2
+  num_layers_decoder: 2
+  ctx_prefix_encoder_layer: true
+  dim_hidden: 64
+  depth: 3
+  num_components: 5
+  use_ar: false
+  std_min: 1e-3
+  std_max: 1.0
+  single_mlp: false
+  use_missing_marker: false

@@ -1,0 +1,20 @@
+defaults:
+  - test_psl
+  - _self_
+
+method:
+  name: apsl
+
+experiment:
+  model_name: APSL
+  expid: kaggle_apsl_light
+
+extra:
+  suffix_segment: apsl_100plus100
+
+apsl:
+  loss_weight: 0.5
+  num_train_preferences: 64
+  num_policy_preferences: 256
+  preference_method: dirichlet
+  log_every: 1

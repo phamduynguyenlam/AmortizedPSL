@@ -1,18 +1,17 @@
-"""PSL-induced preference action rollout for the unchanged TAMO model."""
+"""APSL preference-action rollout for the TAMO-style policy."""
 
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
-from torch import Tensor, nn
+from torch import Tensor
 
 from data.base.masking import restore_by_mask
 from data.gp_sample_function import GPSampleFunction
 from forwards import compute_policy_loss
-from model import ParetoSetMLP, TAMO
+from model import TAMO
 from .preferences import sample_padded_preferences
-from .psl_inner_loop import update_psl_inner_loop
-from .scalarization import smooth_tchebycheff
+from .scalarization import expected_smooth_tchebycheff_loss, smooth_tchebycheff
 
 
 @dataclass
@@ -117,7 +116,85 @@ def select_next_preference(
     )
 
 
-def optimization_forward_psl(
+def generate_apsl_solutions(
+    model: TAMO,
+    x_ctx: Tensor,
+    y_ctx: Tensor,
+    preferences: Tensor,
+    x_mask: Tensor,
+    objective_mask: Tensor,
+) -> Tensor:
+    """Predict ``h(H, lambda)`` with the checkpointed APSL decoder head."""
+    objective_model = getattr(model, "objective_predictor", None)
+    apsl_head = getattr(model, "apsl_head", None)
+    if objective_model is None or apsl_head is None:
+        raise ValueError("APSL requires objective_predictor and apsl_head")
+
+    # PSL loss must not update the objective/history predictor.  Its encoded
+    # history and dimension IDs are features for the separate APSL branch.
+    with torch.no_grad():
+        history_tokens, x_ids, objective_ids = objective_model.encode_history(
+            x_ctx=x_ctx,
+            y_ctx=y_ctx,
+            x_mask=x_mask,
+            y_mask=objective_mask,
+        )
+    return apsl_head(
+        history_tokens=history_tokens,
+        preferences=preferences,
+        x_ids=x_ids.detach(),
+        objective_ids=objective_ids.detach(),
+        x_mask=x_mask,
+        objective_mask=objective_mask,
+    )
+
+
+def compute_apsl_loss(
+    model: TAMO,
+    x_ctx: Tensor,
+    y_ctx: Tensor,
+    x_mask: Tensor,
+    objective_mask: Tensor,
+    ideal_point: Tensor,
+    tau: float,
+    num_preferences: int,
+    preference_method: str,
+) -> Tensor:
+    """Monte-Carlo STCH loss; gradients update APSL but not the surrogate."""
+    lambdas = sample_padded_preferences(
+        objective_mask, num_preferences, preference_method, x_ctx.dtype
+    )
+    generated_x = generate_apsl_solutions(
+        model, x_ctx, y_ctx, lambdas, x_mask, objective_mask
+    )
+    objective_model = model.objective_predictor
+    requires_grad = [parameter.requires_grad for parameter in objective_model.parameters()]
+    was_training = objective_model.training
+    for parameter in objective_model.parameters():
+        parameter.requires_grad_(False)
+    objective_model.eval()
+    try:
+        predicted_y = objective_model.predictive_mean(
+            x_ctx=x_ctx,
+            y_ctx=y_ctx,
+            x_tar=generated_x,
+            x_mask=x_mask,
+            y_mask=objective_mask,
+        )
+        return expected_smooth_tchebycheff_loss(
+            y=predicted_y,
+            lambdas=lambdas,
+            ideal_point=ideal_point.unsqueeze(1),
+            tau=tau,
+            mask=objective_mask,
+        )
+    finally:
+        for parameter, flag in zip(objective_model.parameters(), requires_grad):
+            parameter.requires_grad_(flag)
+        objective_model.train(was_training)
+
+
+def optimization_forward_apsl(
     model: TAMO,
     data_cfg,
     opt_config,
@@ -127,13 +204,15 @@ def optimization_forward_psl(
     T: int,
     device: str,
 ):
-    """Run a PSL-TAMO synthetic trajectory and the original REINFORCE loss."""
+    """Run an APSL synthetic trajectory and the TAMO REINFORCE loss."""
     objective_model = getattr(model, "objective_predictor", None)
     if objective_model is None:
         raise ValueError(
-            "PSL-TAMO requires model.objective_predictor. "
+            "APSL requires model.objective_predictor. "
             "Build it with model.build_objective_predictor before training."
         )
+    if getattr(model, "apsl_head", None) is None:
+        raise ValueError("APSL requires a checkpointed model.apsl_head")
     env = GPSampleFunction(
         data_config=data_cfg,
         batch_size=opt_config.batch_size,
@@ -168,25 +247,16 @@ def optimization_forward_psl(
         scalarization_config.get("tau", 0.1), objective_mask,
     )
 
-    lower, upper = data_cfg.x_range
-    psl_models = [
-        ParetoSetMLP(
-            data_cfg.max_y_dim, data_cfg.max_x_dim,
-            psl_config.get("hidden_dim", 128), psl_config.get("depth", 3),
-            lower, upper,
-        ).to(device)
-        for _ in range(batch_size)
-    ]
-    psl_optimizers = [
-        torch.optim.Adam(psl.parameters(), lr=psl_config.get("lr", 1e-3))
-        for psl in psl_models
-    ]
-    psl_loss = update_psl_inner_loop(
-        psl_models, psl_optimizers, objective_model,
-        x_true, y_true, x_mask, objective_mask, env.y_mins,
-        scalarization_config.get("tau", 0.1),
-        psl_config.get("num_train_preferences", 64),
-        psl_config.get("init_steps", 50), psl_config.get("preference_method", "dirichlet"),
+    apsl_loss = compute_apsl_loss(
+        model=model,
+        x_ctx=x_true,
+        y_ctx=y_true,
+        x_mask=x_mask,
+        objective_mask=objective_mask,
+        ideal_point=env.y_mins,
+        tau=scalarization_config.get("tau", 0.1),
+        num_preferences=psl_config.get("num_train_preferences", 64),
+        preference_method=psl_config.get("preference_method", "dirichlet"),
     )
 
     used_indices = _indices_for_observations(x_true, env._x, env.x_mask)
@@ -195,19 +265,13 @@ def optimization_forward_psl(
     num_policy_preferences = psl_config.get("num_policy_preferences", 256)
 
     for t in range(1, T + 1):
-        if psl_config.get("update_steps", 5) > 0:
-            psl_loss = update_psl_inner_loop(
-                psl_models, psl_optimizers, objective_model,
-                x_true, y_true, x_mask, objective_mask, env.y_mins,
-                scalarization_config.get("tau", 0.1),
-                psl_config.get("num_train_preferences", 64),
-                psl_config.get("update_steps", 5), psl_config.get("preference_method", "dirichlet"),
-            )
         lambdas = sample_padded_preferences(
             objective_mask, num_policy_preferences,
             psl_config.get("preference_method", "dirichlet"), x_true.dtype,
         )
-        x_cont = torch.stack([psl(lambdas[b]) for b, psl in enumerate(psl_models)]).detach()
+        x_cont = generate_apsl_solutions(
+            model, x_true, y_true, lambdas, x_mask, objective_mask
+        ).detach()
         pool_full = _full_pool(env._x, env.x_mask)
         raw_nearest = torch.cdist(
             x_cont[..., env.x_mask], pool_full[..., env.x_mask]
@@ -264,16 +328,21 @@ def optimization_forward_psl(
         batch_first=False,
     )
     stats = {
-        "psl_loss": psl_loss,
-        "psl_candidate_unique_ratio": torch.stack(unique_ratios).mean().item(),
-        "psl_projection_distance": torch.stack(projection_distances).mean().item(),
+        "apsl_loss": apsl_loss.detach().item(),
+        "apsl_candidate_unique_ratio": torch.stack(unique_ratios).mean().item(),
+        "apsl_projection_distance": torch.stack(projection_distances).mean().item(),
         "pref_entropy": torch.stack(entropies).mean().item(),
         "num_unique_pool_candidates": float(num_policy_preferences),
     }
     return (
         loss_acq,
+        apsl_loss,
         step_rewards.mean().detach().item(),
         step_rewards[:, -1].mean().detach().item(),
         entropies[-1].mean().item(),
         stats,
     )
+
+
+# Compatibility for older imports. New code and experiment configs use APSL.
+optimization_forward_psl = optimization_forward_apsl

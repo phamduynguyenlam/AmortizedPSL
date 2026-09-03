@@ -1,4 +1,4 @@
-"""Legacy entry point for evaluating an APSL checkpoint."""
+"""Evaluate a trained APSL checkpoint with a real function budget."""
 
 import os.path as osp
 
@@ -8,7 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from data.dataset import get_function_environment
 from model import build_apsl_head, build_objective_predictor
-from psl_tamo.evaluation import run_psl_optimization, save_psl_rollout
+from psl_tamo.evaluation import run_apsl_optimization, save_apsl_rollout
 from utils.config import build_tamo, load_checkpoint
 from utils.dataclasses import DataConfig, ExConfig, OptimizationConfig
 from utils.log import get_log_filename, get_log_fn
@@ -16,7 +16,7 @@ from utils.paths import get_exp_path, get_result_data_path, get_filename_base
 from utils.seed import set_all_seeds
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="test_psl.yaml")
+@hydra.main(version_base=None, config_path="configs", config_name="test_apsl.yaml")
 def main(config: DictConfig):
     torch.set_default_dtype(torch.float32)
     torch.set_default_device("cpu")
@@ -30,13 +30,13 @@ def main(config: DictConfig):
         get_log_filename(
             model_name=exp_cfg.model_name,
             expid=exp_cfg.expid,
-            prefix="test_psl",
+            prefix="test_apsl",
         )
     )
     log(
-        "==== Resolved PSL evaluation configuration ====\n"
+        "==== Resolved APSL evaluation configuration ====\n"
         + OmegaConf.to_yaml(config, resolve=True)
-        + "================================================"
+        + "==============================================="
     )
 
     exp_path = get_exp_path(exp_cfg.model_name, exp_cfg.expid)
@@ -59,15 +59,15 @@ def main(config: DictConfig):
         x_range=data_cfg.x_range,
     )
     missing, unexpected = model.load_state_dict(checkpoint["model"], strict=False)
-    missing_required = [
+    missing_apsl = [
         key
         for key in missing
         if key.startswith("objective_predictor.") or key.startswith("apsl_head.")
     ]
-    if missing_required:
+    if missing_apsl:
         raise RuntimeError(
-            "Checkpoint does not contain the trained APSL branches:\n  "
-            + "\n  ".join(missing_required)
+            "Checkpoint is not a trained APSL checkpoint:\n  "
+            + "\n  ".join(missing_apsl)
         )
     if missing:
         log("[WARNING] Missing checkpoint keys:\n  " + "\n  ".join(missing))
@@ -92,24 +92,24 @@ def main(config: DictConfig):
         get_result_data_path(
             model_name=exp_cfg.model_name,
             expid=exp_cfg.expid,
-            task_type="optimization_psl",
+            task_type="optimization_apsl",
             filename_base=filename_base,
         ),
         str(exp_cfg.seed),
     )
 
-    result = run_psl_optimization(
+    result = run_apsl_optimization(
         model=model,
         test_function=test_function,
         data_config=data_cfg,
         optimization_config=opt_cfg,
-        psl_config=config.get("apsl", config.get("psl", {})),
+        psl_config=config.apsl,
         scalarization_config=config.scalarization,
         device=exp_cfg.device,
         seed=exp_cfg.seed,
         log=log,
     )
-    save_psl_rollout(result, output_dir, log=log)
+    save_apsl_rollout(result, output_dir, log=log)
 
 
 if __name__ == "__main__":

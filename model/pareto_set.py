@@ -1,4 +1,4 @@
-"""Task-specific Pareto-set model used by PSL-TAMO."""
+"""Task-specific Pareto-set MLP used only by Utility-PSL-TAMO."""
 
 from typing import Optional, Sequence
 

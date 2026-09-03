@@ -6,16 +6,20 @@ from types import SimpleNamespace
 
 from forwards import prediction_forward
 from model import (
-    ParetoSetMLP,
     TAMO,
     TAMOConfig,
+    build_apsl_head,
     build_objective_predictor,
 )
 from psl_tamo.data import prepare_stch_prediction_batches
-from psl_tamo.forwards import project_psl_to_pool, select_next_preference
+from psl_tamo.forwards import (
+    compute_apsl_loss,
+    generate_apsl_solutions,
+    project_psl_to_pool,
+    select_next_preference,
+)
 import psl_tamo.forwards as psl_forwards
 from psl_tamo.scalarization import smooth_tchebycheff
-from psl_tamo.psl_inner_loop import update_psl_inner_loop
 
 
 def _tiny_tamo():
@@ -34,6 +38,17 @@ def _tiny_tamo():
             num_components=3,
         )
     )
+
+
+def _tiny_apsl():
+    model = _tiny_tamo()
+    model.objective_predictor = build_objective_predictor(
+        model.config, max_x_dim=3, max_y_dim=2
+    )
+    model.apsl_head = build_apsl_head(
+        model.config, max_x_dim=3, max_y_dim=2, x_range=[-1.0, 1.0]
+    )
+    return model
 
 
 def test_scalarization_mask_and_gradient():
@@ -79,11 +94,9 @@ def test_scalar_prediction_forward():
     loss.backward()
 
 
-def test_objective_head_nll_and_psl_gradient_isolation():
-    scalar_model = _tiny_tamo()
-    objective_model = build_objective_predictor(
-        scalar_model.config, max_x_dim=3, max_y_dim=2
-    )
+def test_objective_head_nll_and_apsl_gradient_isolation():
+    model = _tiny_apsl()
+    objective_model = model.objective_predictor
     batch_size, nc, nt = 2, 4, 3
     xc, yc = torch.randn(batch_size, nc, 3), torch.randn(batch_size, nc, 2)
     xt, yt = torch.randn(batch_size, nt, 3), torch.randn(batch_size, nt, 2)
@@ -97,13 +110,9 @@ def test_objective_head_nll_and_psl_gradient_isolation():
     loss.backward()
     assert any(parameter.grad is not None for parameter in objective_model.parameters())
 
-    objective_model.zero_grad(set_to_none=True)
-    psl = ParetoSetMLP(2, 3, hidden_dim=16, depth=3, x_lower=-1, x_upper=1)
-    optimizer = torch.optim.Adam(psl.parameters(), lr=1e-3)
-    psl_loss = update_psl_inner_loop(
-        psl_models=[psl],
-        psl_optimizers=[optimizer],
-        objective_model=objective_model,
+    model.zero_grad(set_to_none=True)
+    apsl_loss = compute_apsl_loss(
+        model=model,
         x_ctx=xc[:1],
         y_ctx=yc[:1],
         x_mask=x_mask[:1],
@@ -111,12 +120,27 @@ def test_objective_head_nll_and_psl_gradient_isolation():
         ideal_point=yc[:1].min(dim=1).values,
         tau=0.1,
         num_preferences=8,
-        num_steps=1,
+        preference_method="dirichlet",
     )
-    assert np.isfinite(psl_loss)
-    assert any(parameter.grad is not None for parameter in psl.parameters())
+    apsl_loss.backward()
+    assert torch.isfinite(apsl_loss)
+    assert any(parameter.grad is not None for parameter in model.apsl_head.parameters())
     assert all(parameter.grad is None for parameter in objective_model.parameters())
     assert all(parameter.requires_grad for parameter in objective_model.parameters())
+
+
+def test_apsl_head_is_history_conditioned_and_bounded():
+    model = _tiny_apsl()
+    x_ctx = torch.randn(2, 4, 3)
+    y_ctx = torch.randn(2, 4, 2)
+    x_mask = torch.ones(2, 3, dtype=torch.bool)
+    y_mask = torch.ones(2, 2, dtype=torch.bool)
+    preferences = torch.softmax(torch.randn(2, 5, 2), dim=-1)
+    decisions = generate_apsl_solutions(
+        model, x_ctx, y_ctx, preferences, x_mask, y_mask
+    )
+    assert decisions.shape == (2, 5, 3)
+    assert (decisions >= -1.0).all() and (decisions <= 1.0).all()
 
 
 def test_projection_is_unique_and_avoids_used_points():
@@ -171,10 +195,7 @@ def test_tiny_rollout_end_to_end(monkeypatch):
             return x_ctx, y_ctx, None, regret
 
     monkeypatch.setattr(psl_forwards, "GPSampleFunction", FakeDiscreteEnvironment)
-    model = _tiny_tamo()
-    model.objective_predictor = build_objective_predictor(
-        model.config, max_x_dim=3, max_y_dim=2
-    )
+    model = _tiny_apsl()
     data = SimpleNamespace(max_x_dim=3, max_y_dim=2, x_range=[-1.0, 1.0])
     opt = SimpleNamespace(
         batch_size=2, num_samples=1, num_query_points=10,
@@ -187,10 +208,10 @@ def test_tiny_rollout_end_to_end(monkeypatch):
     )
     result = psl_forwards.optimization_forward_psl(
         model, data, opt, loss,
-        {"hidden_dim": 8, "depth": 2, "init_steps": 1, "update_steps": 1,
-         "num_train_preferences": 4, "num_policy_preferences": 4, "lr": 1e-3},
+        {"loss_weight": 0.5, "num_train_preferences": 4,
+         "num_policy_preferences": 4},
         {"tau": 0.1}, T=2, device="cpu",
     )
-    assert torch.isfinite(result[0])
-    result[0].backward()
+    assert torch.isfinite(result[0]) and torch.isfinite(result[1])
+    (result[0] + result[1]).backward()
     assert any(parameter.grad is not None for parameter in model.parameters())

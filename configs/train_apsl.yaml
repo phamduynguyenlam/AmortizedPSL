@@ -1,0 +1,17 @@
+defaults:
+  - train_psl_tamo
+  - _self_
+
+method:
+  name: apsl
+
+experiment:
+  model_name: APSL
+
+# Persistent, history-conditioned Pareto-set head trained with STCH.
+apsl:
+  loss_weight: 0.5
+  num_train_preferences: 64
+  num_policy_preferences: 256
+  preference_method: dirichlet
+

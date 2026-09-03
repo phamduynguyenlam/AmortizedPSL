@@ -7,7 +7,7 @@ import hydra
 from utils.wandb_wrapper import init as wandb_init
 from utils.log import get_log_filename, get_log_fn
 from utils.config import load_checkpoint, build_tamo
-from model import build_objective_predictor
+from model import build_apsl_head, build_objective_predictor
 from utils.dataclasses import (
     ExConfig,
     DataConfig,
@@ -92,11 +92,17 @@ def main(config: DictConfig):
     # ------------------------------------------------------------------
     model = build_tamo(dict(config.model))
     method_name = config.get("method", {}).get("name", "tamo")
-    if method_name == "psl_tamo":
+    if method_name in {"apsl", "psl_tamo"}:
         model.objective_predictor = build_objective_predictor(
             scalar_tamo_config=model.config,
             max_x_dim=cfgs["data"].max_x_dim,
             max_y_dim=cfgs["data"].max_y_dim,
+        )
+        model.apsl_head = build_apsl_head(
+            tamo_config=model.config,
+            max_x_dim=cfgs["data"].max_x_dim,
+            max_y_dim=cfgs["data"].max_y_dim,
+            x_range=cfgs["data"].x_range,
         )
     model = model.to(cfgs["experiment"].device)
     missing, unexpected = model.load_state_dict(model_state_dict, strict=False)
@@ -168,7 +174,9 @@ def main(config: DictConfig):
     # ------------------------------------------------------------------
     if cfgs["experiment"].task == "prediction":
         prediction_model = (
-            model.objective_predictor if method_name == "psl_tamo" else model
+            model.objective_predictor
+            if method_name in {"apsl", "psl_tamo"}
+            else model
         )
         evaluate_prediction(
             model=prediction_model,

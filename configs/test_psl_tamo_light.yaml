@@ -5,7 +5,8 @@ defaults:
   - _self_
 
 method:
-  name: psl_tamo
+  # Legacy filename; the algorithm is now named APSL.
+  name: apsl
 
 extra:
   ckpt_name: ckpt.tar
@@ -15,9 +16,9 @@ experiment:
   seed: 0
   mode: test
   task: prediction
-  model_name: PSL_TAMO
+  model_name: APSL
   device: cuda
-  expid: kaggle_psl_light
+  expid: kaggle_apsl_light
   resume: true
   override: true
   log_to_wandb: false
