@@ -30,12 +30,13 @@ class ObjectiveValuePredictor(TAMO):
             x_mask=x_mask,
             y_mask=y_mask,
         )
-        num_context = tokens.shape[1]
-        attention_mask = self.transformer_block.make_attention_mask(
-            x_mask, num_context, num_context
-        )
+        # Every token here belongs to the observed history, hence full
+        # self-attention is intended.  Passing an all-False square mask makes
+        # some PyTorch versions incorrectly infer ``is_causal=True``; the
+        # custom context-prefix layer then rightfully fails because it has no
+        # causal mask.  ``mask=None`` is both semantically correct and portable.
         return (
-            self.transformer_block(tokens, mask=attention_mask),
+            self.transformer_block(tokens, mask=None),
             x_ids,
             y_ids,
         )
